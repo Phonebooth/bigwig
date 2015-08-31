@@ -1,0 +1,8 @@
+2015-08-25 15:26:38.965 [info] <0.28349.4629>@mod:func:1 connection_1
+2015-08-25 15:26:39.068 [info] <0.7974.4382>@mod:func:1 session_2 conference_2
+2015-08-25 15:26:39.068 [info] <0.847.1748>@mod:func:1 session_1 conference_1
+2015-08-25 15:26:39.068 [info] <0.21384.1126>@mod:func:1 +19195551234 connection_2
+2015-08-25 15:26:39.068 [info] <0.21384.1126>@mod:func:1 connection_2 session_2
+2015-08-25 15:26:39.068 [info] <0.25538.4396>@mod:func:1 +18885554444 connection_1
+2015-08-25 15:26:39.069 [info] <0.25538.4396>@mod:func:1 conference 3
+2015-08-25 15:26:39.069 [info] <0.16449.4409>@mod:func:1 connection_1 conference_1
