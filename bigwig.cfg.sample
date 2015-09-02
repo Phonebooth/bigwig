@@ -1,0 +1,7 @@
+=LinePattern
+<[\d]+\.[\d]+\.[\d]+>@[\w-]+:[\w-]+:[\d]+ (.*)
+=KeyPatterns
+(connection_[\d\w_\+]+)
+(session_[\d\w_\+]+)
+(conference_[\d\w_\+]+)
+[\+]?1([\d]{10})
