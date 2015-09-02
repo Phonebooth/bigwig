@@ -26,6 +26,7 @@ import (
     "fmt"
     "bufio"
     "os"
+    "os/user"
     "log"
     "time"
     "strings"
@@ -37,6 +38,11 @@ import (
     "path/filepath"
     "strconv"
 )
+
+type BigwigConfig struct {
+    LinePattern *regexp.Regexp
+    KeyPatterns []*regexp.Regexp
+}
 
 type LineBlock struct {
     Start int
@@ -51,10 +57,6 @@ type LineData struct {
 
 type Line struct {
     LD LineData
-    Pid string
-    ModuleName string
-    ModuleFunc string
-    ModuleLine string
     Text string
 }
 
@@ -389,21 +391,30 @@ func initMapper(kvs chan *StringLineDataKV, done chan *KeyLineMapData) {
     }()
 }
 
-func initLineProcessor(lines chan *Line) chan *StringLineDataKV {
-
-    regexes := []*regexp.Regexp {
-        regexp.MustCompile(`(connection_[\d\w_\+]+)`),
-        regexp.MustCompile(`(session_[\d\w_\+]+)`),
-        regexp.MustCompile(`(conference_[\d\w_\+]+)`),
-        regexp.MustCompile(`[\+]?1?([\d]{10})`),
-    }
+func initLineProcessor(config *BigwigConfig, extraKeys *list.List, lines chan *Line) chan *StringLineDataKV {
 
     out := make(chan *StringLineDataKV)
 
+    extraPatterns := make([]*regexp.Regexp, extraKeys.Len())
+    i := 0
+
+    for e := extraKeys.Front(); e != nil; e = e.Next() {
+        extraPatterns[i] = regexp.MustCompile(e.Value.(string))
+        i++
+    }
+
     go func() {
         for line := range lines {
-            for i := 0; i < len(regexes); i++ {
-                matches := regexes[i].FindAllStringSubmatch(line.Text, -1)
+            for i := 0; i < len(config.KeyPatterns); i++ {
+                matches := config.KeyPatterns[i].FindAllStringSubmatch(line.Text, -1)
+                if len(matches) > 0 {
+                    for j := 0; j < len(matches); j++ {
+                        out <- &StringLineDataKV{strings.Trim(matches[j][0], " "), line.LD}
+                    }
+                }
+            }
+            for i = 0; i < len(extraPatterns); i++ {
+                matches := extraPatterns[i].FindAllStringSubmatch(line.Text, -1)
                 if len(matches) > 0 {
                     for j := 0; j < len(matches); j++ {
                         out <- &StringLineDataKV{strings.Trim(matches[j][0], " "), line.LD}
@@ -417,12 +428,12 @@ func initLineProcessor(lines chan *Line) chan *StringLineDataKV {
     return out
 }
 
-func initPipeline(lines chan *Line, done chan *KeyLineMapData, count int) {
-    lineProc := initLineProcessor(lines);
+func initPipeline(config *BigwigConfig, extraKeys *list.List, lines chan *Line, done chan *KeyLineMapData) {
+    lineProc := initLineProcessor(config, extraKeys, lines);
     initMapper(lineProc, done)
 }
 
-func createMap(filename string) *KeyLineMapData {
+func createMap(config *BigwigConfig, filename string, extraKeys *list.List) *KeyLineMapData {
 
     file, err := os.Open(filename)
     if err != nil {
@@ -437,16 +448,12 @@ func createMap(filename string) *KeyLineMapData {
 
     lineChannel := make(chan *Line)
     resultChannel := make(chan *KeyLineMapData)
-    initPipeline(lineChannel, resultChannel, 10)
+    initPipeline(config, extraKeys, lineChannel, resultChannel)
 
     fmt.Printf("scanning %v (%v bytes)\n", filename, fi.Size())
 
     lineno := 0
     reader := bufio.NewReader(file)
-    var unhandledStart, unhandledEnd int = -1, -1
-    unhandledCount := 0
-    unhandledBlocks := list.New()
-    lineRegex := regexp.MustCompile(`(<[\d]+\.[\d]+\.[\d]+>)@([\w-]+):([\w-]+):([\d]+) (.*)`)
 
     start := time.Now()
 
@@ -459,33 +466,10 @@ func createMap(filename string) *KeyLineMapData {
         lineno++
 
         text := strings.Trim(string(buf), " \r\n")
-        tokens := strings.SplitN(text, " ", 4)
-        doMatch := true
 
-        if len(tokens) <= 3 {
-            if unhandledStart == -1 {
-                unhandledStart = lineno
-                unhandledEnd = lineno
-            } else {
-                unhandledEnd = lineno
-            }
-            unhandledCount++
-            doMatch = false
-        } else if unhandledStart != -1 {
-            unhandledBlocks.PushBack(LineBlock{unhandledStart, unhandledEnd})
-            //for e := unhandledBlocks.Front(); e != nil; e = e.Next() {
-            //    fmt.Println(e.Value)
-            //}
-            unhandledStart = -1
-            unhandledEnd = -1
-            unhandledBlocks = list.New()
-        }
-
-        if doMatch {
-            match := lineRegex.FindAllStringSubmatch(text, -1)
-            if len(match) > 0 {
-                lineChannel <- &Line{LineData{lineno, offset, lineLength}, match[0][1], match[0][2], match[0][3], match[0][4], match[0][5]}
-            }
+        match := config.LinePattern.FindAllStringSubmatch(text, -1)
+        if len(match) > 0 {
+            lineChannel <- &Line{LineData{lineno, offset, lineLength}, match[0][1]}
         }
 
         offset += lineLength
@@ -498,17 +482,97 @@ func createMap(filename string) *KeyLineMapData {
 
     mapData := <-resultChannel
 
-    fmt.Printf("processed %v lines (%v unhandled) in %v\n", lineno, unhandledCount, end.Sub(start))
+    fmt.Printf("processed %v lines in %v\n", lineno, end.Sub(start))
 
     return mapData
 }
 
+func loadConfig(filename string) BigwigConfig {
+
+    linePatternString := `<[\d]+\.[\d]+\.[\d]+>@[\w-]+:[\w-]+:[\d]+ (.*)` 
+    keyList := list.New()
+
+    if filename == "" {
+
+        // look in the current directory first
+        filename = "./.bigwig.cfg"
+        _, err := os.Stat(filename)
+        if os.IsNotExist(err) {
+            // now try the user's home directory
+            u, err := user.Current()
+            if err != nil {
+                filename = u.HomeDir + "/.bigwig.cfg"
+            } else {
+                filename = ""
+            }
+        }
+
+        if filename != "" {
+            fmt.Printf("loading config file %v\n", filename)
+        }
+    }
+
+    file, err := os.Open(filename)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer file.Close()
+
+    sc := bufio.NewScanner(file)
+    state := 0
+    i := 1
+
+    for sc.Scan() {
+
+        text := strings.Trim(sc.Text(), " \r\n")
+        if len(text) == 0 {
+            i++
+            continue
+        }
+
+        if text == "=LinePattern" {
+            state = 1
+            i++
+            continue
+        } else if text == "=KeyPatterns" {
+            state = 2
+            i++
+            continue
+        }
+
+        switch state {
+
+            case 1:
+                linePatternString = text
+
+            case 2:
+                keyList.PushBack(text)
+        }
+
+        i++
+    }
+
+    linePattern := regexp.MustCompile(linePatternString)
+
+    keyPatterns := make([]*regexp.Regexp, keyList.Len())
+    i = 0
+
+    for e := keyList.Front(); e != nil; e = e.Next() {
+        keyPatterns[i] = regexp.MustCompile(e.Value.(string))
+        i++
+    }
+
+    return BigwigConfig{linePattern, keyPatterns}
+}
+
 func main() {
 
+    configFilename := ""
     filename := ""
     loadIndexFilename := ""
     saveIndex := false
     correlationKey := ""
+    extraKeys := list.New()
 
     if len(os.Args) > 1 {
         for argi := 1; argi < len(os.Args); argi++ {
@@ -523,11 +587,19 @@ func main() {
             } else if "-f" == os.Args[argi] {
                 argi++
                 filename = os.Args[argi]
+            } else if "-k" == os.Args[argi] {
+                argi++
+                extraKeys.PushBack(os.Args[argi])
+            } else if "--config" == os.Args[argi] {
+                argi++
+                configFilename = os.Args[argi]
             }
         }
     } else {
         return
     }
+
+    config := loadConfig(configFilename)
 
     var mapData *KeyLineMapData = nil
 
@@ -538,7 +610,7 @@ func main() {
         mapData = NewKeyLineMapData()
         mapData.LoadFromIndexFile(loadIndexFilename)
     } else if filename != "" {
-        mapData = createMap(filename)
+        mapData = createMap(&config, filename, extraKeys)
     } else {
         fmt.Printf("expecting index filename and/or filename argument\n")
         return

@@ -1,0 +1,13 @@
+
+- Option to include log file lines within a line range that encompasses
+  a correlation, but are not necessarily correlated.  Or maybe just those
+  lines within the line range and another pattern (like a pid).  Thinking
+  about rtp_connection logs.
+
+- Support for lines that do not match the line regex
+
+- Pre-correlated results saved to a file
+
+- Streaming support (tail -F console.log | bigwig -c ...)
+
+- Multi-file support
