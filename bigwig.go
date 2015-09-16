@@ -624,7 +624,7 @@ func loadConfig(filename string) BigwigConfig {
         if os.IsNotExist(err) {
             // now try the user's home directory
             u, err := user.Current()
-            if err != nil {
+            if err == nil {
                 filename = u.HomeDir + "/.bigwig.cfg"
             } else {
                 filename = ""
