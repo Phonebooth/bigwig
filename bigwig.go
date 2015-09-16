@@ -31,6 +31,7 @@ import (
     "time"
     "strings"
     "container/list"
+//    "container/ring"
     "regexp"
     "sort"
     "io"
@@ -44,11 +45,6 @@ type BigwigConfig struct {
     KeyPatterns []*regexp.Regexp
 }
 
-type LineBlock struct {
-    Start int
-    End int
-}
-
 type LineData struct {
     Number int
     Position int64
@@ -57,12 +53,13 @@ type LineData struct {
 
 type Line struct {
     LD LineData
-    Text string
+    MatchText string
+    FullText string
 }
 
-type StringLineDataKV struct {
-    Key string
-    Value LineData
+type KeysLineKV struct {
+    Keys *list.List
+    Value Line
 }
 
 type KeyLineMapData struct {
@@ -97,14 +94,15 @@ func (m *KeyLineMapData) putLineNumberToLineData(lineno int, data LineData) {
     m.LineNumberToLineData[lineno] = data
 }
 
-func (m *KeyLineMapData) Put(kv *StringLineDataKV) {
-    m.putLineNumberToKeyMap(kv.Value.Number, kv.Key)
-    m.putKeyToLineNumberMap(kv.Key, kv.Value.Number)
-    m.putLineNumberToLineData(kv.Value.Number, kv.Value)
-}
-
-func (mapData *KeyLineMapData) Get(key string) *StringLineDataKV {
-    return nil 
+func (m *KeyLineMapData) Put(kv *KeysLineKV) {
+    if kv.Keys != nil {
+        for e := kv.Keys.Front(); e != nil; e = e.Next() {
+            k := e.Value.(string)
+            m.putLineNumberToKeyMap(kv.Value.LD.Number, k)
+            m.putKeyToLineNumberMap(k, kv.Value.LD.Number)
+            m.putLineNumberToLineData(kv.Value.LD.Number, kv.Value.LD)
+        }
+    }
 }
 
 func (mapData *KeyLineMapData) SaveToIndexFile(filename string) {
@@ -380,7 +378,7 @@ func correlateAndPrint(filename string, correlationKey string, mapData *KeyLineM
     }
 }
 
-func initMapper(kvs chan *StringLineDataKV, done chan *KeyLineMapData) {
+func initMapper(kvs chan *KeysLineKV, done chan *KeyLineMapData) {
     mapData := NewKeyLineMapData()
     go func() {
         for kv := range kvs {
@@ -391,9 +389,9 @@ func initMapper(kvs chan *StringLineDataKV, done chan *KeyLineMapData) {
     }()
 }
 
-func initLineProcessor(config *BigwigConfig, extraKeys *list.List, lines chan *Line) chan *StringLineDataKV {
+func initLineProcessor(config *BigwigConfig, extraKeys *list.List, lines chan *Line) chan *KeysLineKV {
 
-    out := make(chan *StringLineDataKV)
+    out := make(chan *KeysLineKV)
 
     extraPatterns := make([]*regexp.Regexp, extraKeys.Len())
     i := 0
@@ -405,22 +403,28 @@ func initLineProcessor(config *BigwigConfig, extraKeys *list.List, lines chan *L
 
     go func() {
         for line := range lines {
+
+            keys := list.New()
+
             for i := 0; i < len(config.KeyPatterns); i++ {
-                matches := config.KeyPatterns[i].FindAllStringSubmatch(line.Text, -1)
+                matches := config.KeyPatterns[i].FindAllStringSubmatch(line.MatchText, -1)
                 if len(matches) > 0 {
                     for j := 0; j < len(matches); j++ {
-                        out <- &StringLineDataKV{strings.Trim(matches[j][0], " "), line.LD}
+                        keys.PushBack(strings.Trim(matches[j][0], " "))
                     }
                 }
             }
+
             for i = 0; i < len(extraPatterns); i++ {
-                matches := extraPatterns[i].FindAllStringSubmatch(line.Text, -1)
+                matches := extraPatterns[i].FindAllStringSubmatch(line.MatchText, -1)
                 if len(matches) > 0 {
                     for j := 0; j < len(matches); j++ {
-                        out <- &StringLineDataKV{strings.Trim(matches[j][0], " "), line.LD}
+                        keys.PushBack(strings.Trim(matches[j][0], " "))
                     }
                 }
             }
+
+            out <- &KeysLineKV{keys, *line}
         }
         close(out)
     }()
@@ -428,9 +432,18 @@ func initLineProcessor(config *BigwigConfig, extraKeys *list.List, lines chan *L
     return out
 }
 
-func initPipeline(config *BigwigConfig, extraKeys *list.List, lines chan *Line, done chan *KeyLineMapData) {
-    lineProc := initLineProcessor(config, extraKeys, lines);
+func initMapModePipeline(config *BigwigConfig, extraKeys *list.List, lines chan *Line, done chan *KeyLineMapData) {
+    lineProc := initLineProcessor(config, extraKeys, lines)
     initMapper(lineProc, done)
+}
+
+func buildLineFromText(linePattern *regexp.Regexp, lineno int, offset int64, lineLength int64, text string) *Line {
+    var line *Line = nil
+    match := linePattern.FindAllStringSubmatchIndex(text, -1)
+    if len(match) > 0 && len(match[0]) > 1 {
+        line = &Line{LineData{lineno, offset, lineLength}, text[match[0][0]:match[0][1]], text}
+    }
+    return line
 }
 
 func createMap(config *BigwigConfig, filename string, extraKeys *list.List) *KeyLineMapData {
@@ -448,12 +461,13 @@ func createMap(config *BigwigConfig, filename string, extraKeys *list.List) *Key
 
     lineChannel := make(chan *Line)
     resultChannel := make(chan *KeyLineMapData)
-    initPipeline(config, extraKeys, lineChannel, resultChannel)
+    initMapModePipeline(config, extraKeys, lineChannel, resultChannel)
 
     fmt.Printf("scanning %v (%v bytes)\n", filename, fi.Size())
 
     lineno := 0
     reader := bufio.NewReader(file)
+    var line *Line = nil
 
     start := time.Now()
 
@@ -464,12 +478,13 @@ func createMap(config *BigwigConfig, filename string, extraKeys *list.List) *Key
 
         lineLength := int64(len(buf))
         lineno++
-
         text := strings.Trim(string(buf), " \r\n")
 
-        match := config.LinePattern.FindAllStringSubmatch(text, -1)
-        if len(match) > 0 {
-            lineChannel <- &Line{LineData{lineno, offset, lineLength}, match[0][1]}
+        if len(text) > 0 {
+            line = buildLineFromText(config.LinePattern, lineno, offset, lineLength, text)
+            if line != nil {
+                lineChannel <- line
+            }
         }
 
         offset += lineLength
@@ -485,6 +500,115 @@ func createMap(config *BigwigConfig, filename string, extraKeys *list.List) *Key
     fmt.Printf("processed %v lines in %v\n", lineno, end.Sub(start))
 
     return mapData
+}
+
+func initLinePrinter(lines chan *Line) chan bool {
+
+    out := make(chan bool)
+
+    go func() {
+        for l := range lines {
+            fmt.Println(l.FullText)
+        }
+        close(out)
+    }()
+
+    return out
+}
+
+func initStepCorrelator(kvs chan *KeysLineKV, correlationKey string) chan *Line {
+
+    out := make(chan *Line)
+    mapData := NewKeyLineMapData()
+
+    corrLines := make(map[int]int)
+    corrKeys := make(map[string]int)
+
+    go func() {
+        for kv := range kvs {
+
+            mapData.Put(kv)
+
+            correlated := false
+
+            for e := kv.Keys.Front(); e != nil; e = e.Next() {
+                key := e.Value.(string)
+                if key == correlationKey {
+                    correlated = true
+                    corrKeys[key] = 1
+                } else if corrKeys[key] == 1 {
+                    correlated = true
+                }
+            }
+
+            if correlated {
+
+                // all keys on this line are now correlated
+                for e := kv.Keys.Front(); e != nil; e = e.Next() {
+
+                    key := e.Value.(string)
+                    corrKeys[key] = 1
+
+                    // all lines known to contain any of these keys are now correlated
+                    for e := mapData.KeyToLineNumberMap[key].Front(); e != nil; e = e.Next() {
+                        corrLines[e.Value.(int)] = 1
+                    }
+                }
+
+                out <- &kv.Value
+            }
+        }
+        close(out)
+    }()
+
+    return out
+}
+
+func initStepModePipeline(config *BigwigConfig, extraKeys *list.List, correlationKey string, bufSize int, lines chan *Line) chan bool {
+    kvChan := initLineProcessor(config, extraKeys, lines)
+    corrKvChan := initStepCorrelator(kvChan, correlationKey)
+    return initLinePrinter(corrKvChan)
+}
+
+func runStepMode(config *BigwigConfig, extraKeys *list.List, correlationKey string, bufSize int) {
+
+    // TODO: buffer
+//    fmt.Printf("running step mode with buffer size %v lines\n", bufSize)
+
+    lineChannel := make(chan *Line)
+    doneChannel := initStepModePipeline(config, extraKeys, correlationKey, bufSize, lineChannel)
+
+//    rng := ring.New(bufSize)
+//    useRing := true
+
+    file := os.Stdin
+    sc := bufio.NewScanner(file)
+    lineno := 0
+    var line *Line = nil
+
+    for sc.Scan() {
+
+        lineno++
+
+        text := strings.Trim(sc.Text(), " \r\n")
+        if len(text) == 0 {
+            continue
+        }
+
+//        if useRing {
+//            rng.Value = LineRingNode{lineno, text}
+//            rng = rng.Next()
+//        }
+
+        line = buildLineFromText(config.LinePattern, lineno, 0, int64(len(text)), text)
+        if line != nil {
+            lineChannel <- line
+        }
+    }
+
+    close(lineChannel)
+
+    <-doneChannel
 }
 
 func loadConfig(filename string) BigwigConfig {
@@ -573,6 +697,8 @@ func main() {
     saveIndex := false
     correlationKey := ""
     extraKeys := list.New()
+    pipeMode := false
+    bufSize := 1000
 
     if len(os.Args) > 1 {
         for argi := 1; argi < len(os.Args); argi++ {
@@ -590,6 +716,17 @@ func main() {
             } else if "-k" == os.Args[argi] {
                 argi++
                 extraKeys.PushBack(os.Args[argi])
+            } else if "-p" == os.Args[argi] {
+                pipeMode = true
+                argi++
+                if argi < len(os.Args) {
+                    temp, err := strconv.Atoi(os.Args[argi])
+                    if err != nil {
+                        argi--
+                    } else {
+                        bufSize = temp
+                    }
+                }
             } else if "--config" == os.Args[argi] {
                 argi++
                 configFilename = os.Args[argi]
@@ -601,12 +738,18 @@ func main() {
 
     config := loadConfig(configFilename)
 
+    if pipeMode {
+        if correlationKey != "" {
+            runStepMode(&config, extraKeys, correlationKey, bufSize)
+        } else {
+            fmt.Printf("step mode requires a correlation key\n")
+        }
+        return
+    }
+
     var mapData *KeyLineMapData = nil
 
     if loadIndexFilename != "" {
-        if filename != "" {
-            fmt.Printf("warning: loading from index file, %q argument unused\n", filename)
-        }
         mapData = NewKeyLineMapData()
         mapData.LoadFromIndexFile(loadIndexFilename)
     } else if filename != "" {

@@ -1,4 +1,8 @@
 
+- "grep mode" correlator that will correlate the ids found on the first line
+  that contains some other string.  Meaning that you are grepping for an error
+  and as soon as it occurs dump all the correlated data.
+
 - Option to include log file lines within a line range that encompasses
   a correlation, but are not necessarily correlated.  Or maybe just those
   lines within the line range and another pattern (like a pid).  Thinking

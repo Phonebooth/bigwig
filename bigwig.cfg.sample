@@ -1,7 +1,7 @@
 =LinePattern
 <[\d]+\.[\d]+\.[\d]+>@[\w-]+:[\w-]+:[\d]+ (.*)
 =KeyPatterns
-(connection_[\d\w_\+]+)
-(session_[\d\w_\+]+)
-(conference_[\d\w_\+]+)
+(connection_[a-fA-F0-9]{32})
+(conference_[a-fA-F0-9]{32})
+(session_[a-fA-F0-9]{32})
 [\+]?1([\d]{10})
